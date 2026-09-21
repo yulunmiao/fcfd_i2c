@@ -10,6 +10,16 @@ from I2C.I2C_dummy import I2C_dummy
 from typing import Optional, Tuple
 from itertools import product 
 
+class ErrorColorFormatter(logging.Formatter):
+    RED = "\033[31m"
+    RESET = "\033[0m"
+
+    def format(self, record):
+        message = super().format(record)
+        if record.levelno >= logging.ERROR:
+            return f"{self.RED}{message}{self.RESET}"
+        return message
+
 class FCFD_I2C_register:
     """
     This class defines the register structure for the FCFD I2C interface. It provides 
@@ -321,6 +331,12 @@ def main():
         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     else:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    console_handler = next(
+        handler for handler in logging.getLogger().handlers
+        if isinstance(handler, logging.StreamHandler)
+    )
+    console_handler.setFormatter(ErrorColorFormatter('%(asctime)s - %(levelname)s - %(message)s'))
 
     if args.log_file:
         file_handler = logging.FileHandler(args.log_file)
