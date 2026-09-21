@@ -306,7 +306,7 @@ def main():
     import argparse
     argparser = argparse.ArgumentParser(description="FCFD interface for performing I2C operations",epilog="The script would proceed in the interactive if the --interactive option is specified, otherwise it would perform the operations specified by the other options and exit; if multiple operations are specified, they will be performed in the order of --self-test --set-default, --write, and --read")
     argparser.add_argument("--json", "-j", type=str, default="./config/config_windows.json", help="Path to the JSON config file")
-    argparser.add_argument("--write", "-w", nargs=2, metavar=("REGISTER", "VALUES"),help="Write to a register, format: register_name,[values]") 
+    argparser.add_argument("--write", "-w", nargs=2, metavar=("REGISTER", "VALUES"),help="Write comma-separated decimal, 0b-prefixed binary, or 0x-prefixed hexadecimal values")
     argparser.add_argument("--read", "-r", nargs='*', metavar="REGISTER", type=str, help="Read from registers, format: register_names or use all to read all readable registers")
     argparser.add_argument("--set-default", "-d", action="store_true", help="Set all registers to their default values")
     argparser.add_argument("--self-test", "-t", action="store_true", help="Run self-test to verify read/write operations")
@@ -370,7 +370,7 @@ def main():
                         break
                     try:
                         register, values_str = user_input.split()
-                        values = [int(v) for v in values_str.split(",")]
+                        values = [int(v, 0) for v in values_str.split(",")]
                         if args.board_address is not None:
                             board_addresses = [args.board_address]
                         else:
@@ -439,7 +439,7 @@ def main():
 
     if args.write:
         register, values_str = args.write
-        values = [int(v) for v in values_str.split(",")]
+        values = [int(v, 0) for v in values_str.split(",")]
         if args.board_address is not None:
             board_addresses = [args.board_address]
         else:

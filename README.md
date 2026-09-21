@@ -117,7 +117,12 @@ to read all readable registers.
 python FCFD_I2C_register.py --json ./config/config_windows.json --write REG_NAME VALUES
 ```
 
-This writes the values as a byte array to the selected register.
+This writes comma-separated values as a byte array to the selected register. Values may be decimal or use Python-style `0b` binary and `0x` hexadecimal prefixes, for example:
+
+```bash
+python FCFD_I2C_register.py --json ./config/config_dummy.json --write clk_eq 0b10
+python FCFD_I2C_register.py --json ./config/config_dummy.json --write clk_eq 0x2
+```
 
 ### Set registers to defaults
 
