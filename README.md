@@ -86,8 +86,8 @@ Each register contains:
 ### Clone the repository first:
 
 ```bash
-git clone https://github.com/yulunmiao/fcfd-i2c
-cd fcfd-i2c
+git clone https://github.com/yulunmiao/fcfd_i2c
+cd fcfd_i2c
 
 # currently commented out as no additional package is needed
 # pip install -r requirements.txt
