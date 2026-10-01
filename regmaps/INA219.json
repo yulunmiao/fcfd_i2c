@@ -1,0 +1,80 @@
+{
+  "rst": {
+    "address": [1],
+    "bit_range": [7],
+    "access": "rw",
+    "default": 0,
+    "description": "Reset bit in the high byte of the configuration register. Set to 1 to reset all registers."
+  },
+  "brng": {
+    "address": [1],
+    "bit_range": [5, 6],
+    "access": "rw",
+    "default": 1,
+    "description": "Bus voltage range: 0=16V, 1=32V."
+  },
+  "pg": {
+    "address": [1],
+    "bit_range": [3, 4],
+    "access": "rw",
+    "default": 3,
+    "description": "PGA gain: 00=±40mV, 01=±80mV, 10=±160mV, 11=±320mV."
+  },
+  "badc": {
+    "address": [0, 1],
+    "bit_range": [[7], [0, 2]],
+    "access": "rw",
+    "default": [1,1],
+    "description": "Bus ADC resolution and averaging control."
+  },
+  "sadc": {
+    "address": [0],
+    "bit_range": [3, 6],
+    "access": "rw",
+    "default": 3,
+    "description": "Shunt ADC resolution and averaging control."
+  },
+  "mode": {
+    "address": [0],
+    "bit_range": [0, 2],
+    "access": "rw",
+    "default": 7,
+    "description": "Operating mode: 000=power down, 111=continuous bus+shunt."
+  },
+  "shunt_voltage": {
+    "address": [2, 3],
+    "bit_range": [0, 7],
+    "access": "ro",
+    "default": "N/A",
+    "description": "Shunt voltage measurement data."
+  },
+  "bus_voltage": {
+    "address": [4, 5],
+    "bit_range": [0, 7],
+    "access": "ro",
+    "default": "N/A",
+    "description": "Bus voltage measurement data."
+  },
+  "power": {
+    "address": [6, 7],
+    "bit_range": [0, 7],
+    "access": "ro",
+    "default": "N/A",
+    "description": "Power measurement data."
+  },
+  "current": {
+    "address": [8, 9],
+    "bit_range": [0, 7],
+    "access": "ro",
+    "default": "N/A",
+    "description": "Contains the value of the current flowing through the shunt resistor."
+  },
+  "calibration": {
+    "address": [10, 11],
+    "bit_range": [0, 7],
+    "access": "rw",
+    "default": 0,
+    "description": "Sets full-scale range and LSB of current and power measurements. Overall system calibration."
+  },
+  "_comment": "This file contains the INA219 register map defined in TI datasheet Table 2 and Table 3."
+}
