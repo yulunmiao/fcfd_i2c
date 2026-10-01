@@ -1,5 +1,42 @@
 {
-    "regmap": "../regmaps/FCFD_v1.2.json",  
-    "board_addresses": [0],
-    "I2C_type": ["dummy"]
+    "FCFD": {
+        "regmap": "../regmaps/FCFD_v1.2.json",
+        "address": 0,
+        "I2C_type": "dummy"
+    },
+    "VDDA": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 64,
+        "I2C_type": "dummy"
+    },
+    "VDDi": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 65,
+        "I2C_type": "dummy"
+    },
+    "VDD1": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 66,
+        "I2C_type": "dummy"
+    },
+    "VDDD": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 67,
+        "I2C_type": "dummy"
+    },
+    "VDD": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 68,
+        "I2C_type": "dummy"
+    },
+    "VDDPST": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 69,
+        "I2C_type": "dummy"
+    },
+    "VDDTDC": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 70,
+        "I2C_type": "dummy"
+    }
 }

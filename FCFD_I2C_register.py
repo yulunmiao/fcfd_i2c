@@ -1,14 +1,9 @@
 import json
-from enum import Enum
 import logging
 from pathlib import Path
-import time
-from typing import List, Optional, Tuple
-from I2C.I2C import I2C
 from I2C.I2C_windows import I2C_windows
 from I2C.I2C_dummy import I2C_dummy
-from typing import Optional, Tuple
-from itertools import product 
+from i2c_register_map import I2CRegisterMap
 
 class ErrorColorFormatter(logging.Formatter):
     RED = "\033[31m"
@@ -20,297 +15,320 @@ class ErrorColorFormatter(logging.Formatter):
             return f"{self.RED}{message}{self.RESET}"
         return message
 
-class FCFD_I2C_register:
-    """
-    This class defines the register structure for the FCFD I2C interface. It provides 
-    methods to read from and write to the registers, as well as to configure the I2C 
-    settings. The class encapsulates the register addresses and their corresponding 
-    values, allowing for easy manipulation of the I2C interface. It allows multiple 
-    I2C transports to be used, so long as the I2Cs are with the same register map. 
-    The I2C transport is passed in as a dictionary of board addresses to I2C objects.
 
-    This class uses write, read, and get_number_of_devices methods from the I2C class 
-    to communicate with the hardware.
-    N.B. The write, read functions handles the whole byte(s) of the register, thus the 
-    bit_range is used to put the value in the correct bits of the byte(s) of the register. 
-    The bit_range is a list of [lsb, msb] for each byte in the register.
-    """
-    class access_type(Enum):
-        READ_ONLY = 0
-        WRITE_ONLY = 1
-        READ_WRITE = 2
-    
-    def __init__(self, json_file:str = None, i2cs: dict[int, I2C] = None):
-        time.sleep(1)
-        self.i2cs = i2cs if i2cs is not None else {0x72: I2C_windows(board_address=0x72)}
+def load_configured_devices(config, config_path, argparser):
+    register_map_by_address = {}
+    address_by_name = {}
+    groups = {}
+    for device_name, device_cfg in config.items():
+        if (not isinstance(device_cfg, dict) 
+            or "regmap" not in device_cfg 
+            or "address" not in device_cfg 
+            or "I2C_type" not in device_cfg):
+            continue
+        regmap_path = Path(device_cfg["regmap"])
+        if not regmap_path.is_absolute():
+            regmap_path = config_path.parent / regmap_path
+        regmap_path = regmap_path.resolve()
+        if not regmap_path.is_file():
+            argparser.error(f"register map does not exist: {regmap_path}")
 
-        self._registers = {}
-        if json_file is None:
+        device_address = int(device_cfg["address"])
+        i2c_type = device_cfg["I2C_type"]
+        group_key = (regmap_path, i2c_type)
+        if group_key not in groups:
+            if i2c_type == "windows":
+                i2c = I2C_windows()
+            elif i2c_type == "dummy":
+                i2c = I2C_dummy(str(regmap_path))
+            else:
+                raise ValueError(f"Unknown I2C type: {i2c_type}")
+            groups[group_key] = I2CRegisterMap(json_file=str(regmap_path), i2c=i2c)
+
+        register_map_by_address[device_address] = {
+            "register_map": groups[group_key],
+        }
+        address_by_name[device_name] = device_address
+
+    return register_map_by_address, address_by_name
+
+
+def resolve_command_line_targets(register_map_by_address, address_by_name, device_names, device_addresses, argparser):
+    if device_names is None and device_addresses is None:
+        selected_addresses = list(register_map_by_address)
+    else:
+        selected_addresses = []
+        for device_name in device_names or []:
+            if device_name not in address_by_name:
+                argparser.error(f"unknown device name: {device_name}")
+            device_address = address_by_name[device_name]
+            if device_address not in selected_addresses:
+                selected_addresses.append(device_address)
+        for device_address in device_addresses or []:
+            if device_address not in register_map_by_address:
+                argparser.error(f"unknown board address: {device_address}")
+            if device_address not in selected_addresses:
+                selected_addresses.append(device_address)
+
+    name_by_address = {}
+    for device_name, device_address in address_by_name.items():
+        name_by_address.setdefault(device_address, device_name)
+
+    return [
+        (
+            name_by_address[device_address],
+            device_address,
+            register_map_by_address[device_address]["register_map"],
+        )
+        for device_address in selected_addresses
+    ]
+
+
+def run_interactive_write(register_map_by_address, address_by_name):
+    while True:
+        print(
+            "Enter a device name/address, register name, and comma-separated value(s) "
+            "(e.g. 'VDDA rst 1'), or 'e' to return to mode selection:"
+        )
+        user_input = input(str())
+        if user_input == 'e':
             return
-        with open(json_file, 'r') as f:
-            input_json = json.load(f)
 
-        for register, properties in input_json.items():
-            if not isinstance(properties, dict):
-                continue
+        parts = user_input.split(maxsplit=2)
+        if len(parts) != 3:
+            print("Enter a device, register, and value(s). Please try again.")
+            continue
 
-            access_type_str = properties['access'].lower()
-            access_types = {
-                'ro': self.access_type.READ_ONLY,
-                'wo': self.access_type.WRITE_ONLY,
-                'rw': self.access_type.READ_WRITE,
-            }
-            try:
-                access_type = access_types[access_type_str]
-            except KeyError as error:
-                raise ValueError(
-                    f"Unsupported access type {access_type_str!r} for {register!r}"
-                )
-
-            address = properties['address']
-            # Address can either be a list with 
-            # 1 element for individual registers
-            # or 2 elements marking the starting and ending address bytes for grouped registers
-
-            # Each register has a 2 byte address and 1 byte of data, the 8 data bits are allocated as in the json,
-            # some portions of the register map have sequential registers that save the same purpose hence motivating the 'grouped registers'
-            if (not isinstance(address, list) 
-                or (len(address)!= 1 and len(address)!=2)):
-                raise ValueError(
-                    f"Address for {register!r} must be list of 1 or 2 elements, currently being {address}"
-                )
-
-            lsa = properties["address"][0]
-            msa = properties["address"][-1]
-            byte_width = msa - lsa +1 
-            bit_range = properties['bit_range']
-            # If it is a single byte register bit_range can be
-            # 1-d list have 1 element being the bit of the register
-            # 1-d list have 2 element marking the start and end bit of the register 
-            if len(address)==1:
-                if (not isinstance(bit_range, list)
-                    or (len(bit_range)!=1 and len(bit_range)!=2)):
-                    raise TypeError(
-                        f"Bit_range for {register!r} must be a list of 1 or 2 elements, currently being {bit_range}"
-                    )
-            # If it is a mulit-byte register bit_range can be
-            # 1-d list have 2 element for the same bits in all bytes
-            # 2-d list [n][2], marking the start and end bit of the register in each byte repectively
-            else:
-                if not isinstance(bit_range, list) or (
-                    len(bit_range) != 2 and not (
-                        all(isinstance(entry, list) and len(entry) == 2 for entry in bit_range)
-                    )
-                ):
-                    raise TypeError(
-                        f"Bit_range for {register!r} must be a 1-d list of 2 elements or a 2-d list [n][2] for a multi-byte register, currently being {bit_range}"
-                    )
-            # format the bit_range into a list of [lsb, msb] for each byte in the register
-            bit_range = self._per_byte_ranges(bit_range, byte_width)
-
-
-            # default must be N/A or single integer
-            if properties['default'] == 'N/A':
-                default = None
-                value = [None] * byte_width
-            elif not isinstance(properties['default'], int):
-                raise TypeError(
-                    f"Address and bit_range for {register!r} must be lists"
-                )
-            else:
-                default = properties['default']
-                value = bytearray([default]) * byte_width
-            self._registers[register] = {
-                'address': address,
-                'bit_range': bit_range,
-                'access': access_type,
-                'default': default,
-            }
-
-    def _per_byte_ranges(self, bit_range: List, byte_width: int) -> List[List[int]]:
-        # Normalize bit_range into a list of [lsb, msb], one per byte in the register
-        # Used by both read and write
-        # For a field that covers a single byte
-        if byte_width == 1:
-            # For a field that covers one bit on one byte
-            return [[bit_range[0], bit_range[-1]]]
-        # For a field that covers multiple bytes
-        if all(isinstance(entry, list) for entry in bit_range):
-            # For a field of multiple bytes where the bit_range is a list of lists eg 'hit_trig_bcid'
-            return [[entry[0], entry[-1]] for entry in bit_range]
-        # For a field of multiple bytes where each byte uses the same range of bits eg 'ch5_TDC_data'
-        return [[bit_range[0], bit_range[-1]]] * byte_width
-
-    def write(self, board_address: int, register: str, value: bytearray=bytearray() ) -> bool:
-        # Write byte array to the register
-        # If you want to write 0 to register 'write_test' you would do FCFD_I2C_register.write('write_test', [0])
-        # Accepts an integer or a byte array-like payload and validates it against the configured bit range before storing the result
+        device_selector, register_selector, values_string = parts
         
-        # Register must exist
-        if register not in self._registers:
-            logging.debug(f"[FCFD_I2C_register.write] Unknown register: {register!r}")
-            return False
+        try:
+            device_address = address_by_name.get(device_selector)
+            if device_address is None:
+                try:
+                    device_address = int(device_selector, 0)
+                except ValueError as error:
+                    raise ValueError(f"unknown device name or address: {device_selector}") from error
+            if device_address not in register_map_by_address:
+                raise ValueError(f"unknown device name or address: {device_selector}")
 
-        # Register must be writable
-        properties = self._registers[register]
-        if properties['access'] == self.access_type.READ_ONLY:
-            logging.debug(f"[FCFD_I2C_register.write] Register {register!r} is read-only")
-            return False
+            device = register_map_by_address[device_address]["register_map"]
+            if register_selector in device._registers:
+                register = register_selector
+            else:
+                raise ValueError(f"unknown register name: {register_selector}")
 
-        lsa = properties["address"][0]
-        msa = properties["address"][-1]
-        # Number of bytes the register covers
-        byte_width = msa - lsa +1 
+            values = bytearray(int(value.strip(), 0) for value in values_string.split(","))
 
-        if(len(value) != byte_width):
-            logging.debug(f"[FCFD_I2C_register.write] Mismatch in register size and value size")
-            logging.debug(f"[FCFD_I2C_register.write] Register {register} has {byte_width} bytes")
-            logging.debug(f"[FCFD_I2C_register.write] Value has {len(value)} bytes")
-            return False
+        except ValueError as error:
+            print(f"Invalid input: {error}. Please try again.")
+            continue
 
-        # Establish the bit ranges per byte of the register
-        bit_range = properties["bit_range"]
-
-        # Bit-width check between the input value and the available bits
-        for byte_val, (lsb, msb) in zip(value, bit_range):
-            bit_width = msb - lsb + 1
-            if byte_val >= ((0b1) << bit_width):
-                logging.debug(f"[FCFD_I2C_register.write] Mismatch in register size and value size")
-                logging.debug(f"[FCFD_I2C_register.write] Register {register} has {bit_width} bits")
-                logging.debug(f"[FCFD_I2C_register.write] Cannot contain 0b{byte_val:b}")
-                return False
- 
-        # Fields can share a byte with other fields (e.g. clk_enable, clk_inv_data, clk_eq etc. are all packed into byte 0)
-        # So read the current byte(s) first, patch in only this field's bits, and write the whole byte(s) back
-        if properties['access'] == self.access_type.WRITE_ONLY:
-            # Strobe bits have no meaningful state to preserve
-            current = bytearray(byte_width)
+        if device.write(device_address, register, values):
+            logging.info(
+                f"Successfully wrote {list(values)} to {register} on board {device_address}"
+            )
         else:
-            error_code, existing = self.i2cs[board_address].read(board_address, lsa, byte_width)
-            if error_code != 0:
-                logging.debug(f"[FCFD_I2C_register.write] Could not read back current value of {register!r} before writing; aborting")
-                return False
-            current = bytearray(existing)
- 
-        for i, (byte_val, (lsb, msb)) in enumerate(zip(value, bit_range)):
-            width = msb - lsb + 1
-            mask = (1 << width) - 1
-            current[i] = (current[i] & ~(mask << lsb) & 0xFF) | ((byte_val & mask) << lsb)
+            logging.error(
+                f"Failed to write {list(values)} to {register} on board {device_address}"
+            )
 
-        # Actually write the values to the chip
-        if not self.i2cs[board_address].write(board_address, lsa, bytes(current)):
-            return False
+def run_interactive_read(register_map_by_address, address_by_name):
+    while True:
+        print(
+            "Enter device name(s)/address(es) followed by register name(s), separated by spaces "
+            "(e.g. 'VDDA rst'). Use 'all' as the device to select every configured device, "
+            "or as the register to read every readable register. Enter 'e' to return:"
+        )
+        user_input = input(str())
+        if user_input == 'e':
+            return
 
-        return True
+        parts = user_input.split()
+        if len(parts) < 2:
+            print("Enter a device and register(s). Please try again.")
+            continue
 
-    def read(self, board_address: int, register: str) -> Tuple[int, Optional[bytearray]]:
-        # Read the register from hardware and return the field's value(s) as a bytearray
-        # Returns None on an unknown register, a write-only register, or an I2C error.
-        # returns a tuple of (error_code, value) where error_code is 0 for success, -1 
-        # for failing sanity checks, and I2C defined error codes for I2C errors. 
-        # 
-        # The value is a bytearray of the register's value(s) if successful, or None if unsuccessful.
+        selector_index = 0
+        try:
+            if parts[0] == "all":
+                target_addresses = list(register_map_by_address)
+                selector_index = 1
+            else:
+                target_addresses = []
+                while selector_index < len(parts):
+                    device_selector = parts[selector_index]
+                    device_address = address_by_name.get(device_selector)
+                    if device_address is None:
+                        try:
+                            device_address = int(device_selector, 0)
+                        except ValueError:
+                            break
+                    if device_address not in register_map_by_address:
+                        if not target_addresses:
+                            raise ValueError(
+                                f"unknown device name or address: {device_selector}"
+                            )
+                        break
+                    if device_address not in target_addresses:
+                        target_addresses.append(device_address)
+                    selector_index += 1
+                if not target_addresses:
+                    raise ValueError(f"unknown device name or address: {parts[0]}")
 
-        
-        # Check that the register exists
-        if register not in self._registers:
-            logging.debug(f"[FCFD_I2C_register.read] Unknown register: {register!r}")
-            return -1, None
+            register_selectors = parts[selector_index:]
+            if not register_selectors:
+                raise ValueError("provide at least one register name or 'all'")
 
-        # Check that the register can be read from
-        properties = self._registers[register]
-        if properties['access'] == self.access_type.WRITE_ONLY:
-            logging.debug(f"[FCFD_I2C_register.read] Register {register!r} is write-only")
-            return -1, None
- 
-        lsa = properties["address"][0]
-        msa = properties["address"][-1]
-        # How many bytes the register spans
-        byte_width = msa - lsa + 1
-
-        # Read the byte values of the register's span
-        error_code, raw = self.i2cs[board_address].read(board_address, lsa, byte_width)
-
-        if error_code != 0:
-            return error_code, None
-
-        # Create the bit range per byte in the field's byte span
-        extracted = bytearray(byte_width)
-        # Split the raw read values into the values for the register
-        for i, (byte_val, (lsb, msb)) in enumerate(zip(raw, properties['bit_range'])):
-            width = msb - lsb + 1
-            mask = (1 << width) - 1
-            extracted[i] = (byte_val >> lsb) & mask
- 
-        return 0, extracted
-
-    # Check that a register matches the desired value
-    def check_reg(self, board_address: int, register: str, data: bytearray=bytearray()) -> bool:
-        success, check = self.read(board_address, register)
-        if success == 0 and check == bytes(data):
-            return True
-        else:
-            return False
-
-    # Set writeable registers to default values
-    def set_default(self, board_address: int) -> None:
-        for register in self._registers:
-            if self._registers[register]['access'] == self.access_type.READ_ONLY: 
-                logging.debug(f'[FCFD_I2C_register.set_default]Register {register}: this register is read only.')
-                continue
-            if self._registers[register]['access'] == self.access_type.WRITE_ONLY: 
-                logging.debug(f'[FCFD_I2C_register.set_default]Register {register}: this register is write only.')
-                continue
-            check = False
-            while not check:
-                value = [self._registers[register]['default']]
-                self.write(board_address, register, value)
-                check = self.check_reg(board_address, register, value)
-            logging.info(f'[FCFD_I2C_register.set_default]Register {register}: has been set to it\'s default value.')
-    # Error code descriptions are provided by the I2C transport, so this function just calls the transport's describe_error method.
-
-    def self_test(self, board_address: int) -> bool:
-        # Perform a self-test by writing and reading back each writable register
-        logging.info("[FCFD_I2C_register.self_test] Starting self-test of read-writable registers")
-        for register, properties in self._registers.items():
-            if properties['access'] != self.access_type.READ_WRITE:
-                continue
-            # loop through all possible values for the register byte and bit range
-            logging.info(f"[FCFD_I2C_register.self_test] Testing register {register!r}")
-            possible_values = [
-                list(range(1 << (msb-lsb+1))) for lsb, msb in properties['bit_range']
+            target_devices = [
+                (device_address, register_map_by_address[device_address])
+                for device_address in target_addresses
             ]
-            test_values = [bytearray(test_value) for test_value in product(*possible_values)]
-            for test_value in test_values:
-                # Write the test value to the register
-                if not self.write(board_address, register, test_value):
-                    logging.error(f"[FCFD_I2C_register.self_test] Failed to write 0x{test_value.hex()} to {register!r}")
-                    continue
-                # Read back the value from the register
-                error_code, read_value = self.read(board_address, register)
-                if error_code != 0:
-                    if error_code == -1:
-                        logging.error(f"[FCFD_I2C_register.self_test] Failed to read from {register!r}: register is unknown or write-only")
-                    else:
-                        logging.error(f"[FCFD_I2C_register.self_test] Failed to read from {register!r}: {self.describe_error(board_address, error_code)}")
-                    continue
-                # Check that the read value matches the written value
+            target_registers_by_device = None if "all" in register_selectors else register_selectors
+        except ValueError as error:
+            print(f"Invalid input: {error}. Please try again.")
+            continue
+
+        for device_address, device_config in target_devices:
+            device = device_config["register_map"]
+            if target_registers_by_device is None:
+                target_registers = [
+                    name for name, properties in device._registers.items()
+                    if properties["access"] != device.access_type.WRITE_ONLY
+                ]
+            else:
+                target_registers = target_registers_by_device
+
+            for register in target_registers:
+                error_code, value = device.read(device_address, register)
+                if error_code == 0:
+                    logging.info(f"Read from {register} on board {device_address}: {list(value)}")
+                elif error_code == -1:
+                    logging.error(
+                        f"Failed to read from {register} on board {device_address}: "
+                        "register is unknown or write-only"
+                    )
                 else:
-                    logging.debug(f"[FCFD_I2C_register.self_test] Wrote 0x{test_value.hex()} to {register!r}, read back 0x{read_value.hex()}")
-                if read_value != test_value:
-                    logging.error(f"[FCFD_I2C_register.self_test] Mismatch for {register!r}: wrote 0x{test_value.hex()}, read 0x{read_value.hex()}")
-                    continue
-        logging.info("[FCFD_I2C_register.self_test] Finish self-test of read-writable registers")
-        return True
-    def describe_error(self, board_address: int, code: int) -> str:
-        return self.i2cs[board_address].describe_error(code)    
-    def __str__(self):
-        rtn = ""
-        for register, properties in self._registers.items():
-            rtn += f"Register: {register}\n"
-            for key, value in properties.items():
-                rtn+=f"\t{key}:{value}\n"
-        return rtn
+                    logging.error(
+                        f"Failed to read from {register} on board {device_address}: "
+                        f"{device.describe_error(device_address, error_code)}"
+                    )
+
+def run_interactive_self_test(register_map_by_address, address_by_name):
+    while True:
+        print(
+            "Enter device name(s)/address(es) to run self-test, separated by spaces "
+            "(e.g. 'VDDA'). Use 'all' as the device to select every configured device. Enter 'e' to return:"
+        )
+        user_input = input(str())
+        if user_input == 'e':
+            return
+
+        parts = user_input.split()
+        if not parts:
+            print("Enter at least one device name or address. Please try again.")
+            continue
+
+        try:
+            if parts[0] == "all":
+                target_addresses = list(register_map_by_address)
+            else:
+                target_addresses = []
+                for device_selector in parts:
+                    device_address = address_by_name.get(device_selector)
+                    if device_address is None:
+                        try:
+                            device_address = int(device_selector, 0)
+                        except ValueError:
+                            raise ValueError(f"unknown device name or address: {device_selector}")
+                    if device_address not in register_map_by_address:
+                        raise ValueError(f"unknown device name or address: {device_selector}")
+                    if device_address not in target_addresses:
+                        target_addresses.append(device_address)
+
+        except ValueError as error:
+            print(f"Invalid input: {error}. Please try again.")
+            continue
+
+        for device_address in target_addresses:
+            device = register_map_by_address[device_address]["register_map"]
+            device.self_test(device_address)
+
+def run_interactive_set_default(register_map_by_address, address_by_name):
+    while True:
+        print(
+            "Enter device name(s)/address(es) to set registers to default values, separated by spaces "
+            "(e.g. 'VDDA'). Use 'all' as the device to select every configured device. Enter 'e' to return:"
+        )
+        user_input = input(str())
+        if user_input == 'e':
+            return
+
+        parts = user_input.split()
+        if not parts:
+            print("Enter at least one device name or address. Please try again.")
+            continue
+
+        try:
+            if parts[0] == "all":
+                target_addresses = list(register_map_by_address)
+            else:
+                target_addresses = []
+                for device_selector in parts:
+                    device_address = address_by_name.get(device_selector)
+                    if device_address is None:
+                        try:
+                            device_address = int(device_selector, 0)
+                        except ValueError:
+                            raise ValueError(f"unknown device name or address: {device_selector}")
+                    if device_address not in register_map_by_address:
+                        raise ValueError(f"unknown device name or address: {device_selector}")
+                    if device_address not in target_addresses:
+                        target_addresses.append(device_address)
+
+        except ValueError as error:
+            print(f"Invalid input: {error}. Please try again.")
+            continue
+
+        for device_address in target_addresses:
+            device = register_map_by_address[device_address]["register_map"]
+            device.set_default(device_address)
+            logging.info(f"Set registers to default values on board {device_address}")
+
+def run_interactive_mode(register_map_by_address, address_by_name):
+    while True:
+        print(
+            "\nAvailable modes:"
+            "\n  w  Write register values"
+            "\n  r  Read registers"
+            "\n  d  Set registers to defaults"
+            "\n  t  Run self-test"
+            "\n  l  List all registers"
+            "\n  ld List all registers with details"
+            "\n  e  Exit"
+        )
+        mode = input(str())
+        if mode == 'e':
+            return
+        elif mode == 'w':
+            run_interactive_write(register_map_by_address, address_by_name)
+        elif mode == 'r':
+            run_interactive_read(register_map_by_address, address_by_name)
+        elif mode == 'd':
+            run_interactive_set_default(register_map_by_address, address_by_name)
+        elif mode == 't':
+            run_interactive_self_test(register_map_by_address, address_by_name)
+        elif mode == 'l':
+            for device_name, device_address in address_by_name.items():
+                device = register_map_by_address[device_address]["register_map"]
+                logging.info(f"Registers for board {device_name} (address {device_address}):\n{list(device._registers.keys())}")
+        elif mode == 'ld':
+            for device_name, device_address in address_by_name.items():
+                device = register_map_by_address[device_address]["register_map"]
+                logging.info(f"Registers for board {device_name} (address {device_address}):\n{device}")
+        else:
+            print('Invalid mode. Please try again.')
+
+
 
 def main():
     import argparse
@@ -321,7 +339,8 @@ def main():
     argparser.add_argument("--set-default", "-d", action="store_true", help="Set all registers to their default values")
     argparser.add_argument("--self-test", "-t", action="store_true", help="Run self-test to verify read/write operations")
     argparser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
-    argparser.add_argument("--board-address", "-b", nargs='*', type=int, default=None, help="Board addresses to use for I2C operations; if not specified, all board addresses in the config file will be used")
+    argparser.add_argument("--board-address", "-b", nargs="+", type=int, default=None, help="Board addresses to use for I2C operations")
+    argparser.add_argument("--device-name", "--device", nargs="+", dest="device_names", metavar="NAME", help="Configured device names to use; may be combined with --board-address")
     argparser.add_argument("--debug", "-D", action="store_true", help="Enable debug logging")
     argparser.add_argument("--log-file", "-l", type=str, default=None, help="Path to a log file; if not specified, logs will be printed to the console")
 
@@ -352,137 +371,60 @@ def main():
     with config_path.open('r') as f:
         config = json.load(f)
 
-    if not config.get("regmap"):
+    if not isinstance(config, dict) or not any(isinstance(v, dict) and "regmap" in v for v in config.values()):
         argparser.error("no register map specified in config file")
-    regmap_path = Path(config["regmap"])
-    if not regmap_path.is_absolute():
-        regmap_path = config_path.parent / regmap_path
-    regmap_path = regmap_path.resolve()
-    if not regmap_path.is_file():
-        argparser.error(f"register map does not exist: {regmap_path}")
 
-    i2cs = {}
-    for board_address, i2c_type in zip(config["board_addresses"], config["I2C_type"]):
-        if i2c_type == "windows":
-            i2cs[board_address] = I2C_windows(board_address=board_address)
-        elif i2c_type == "dummy":
-            i2cs[board_address] = I2C_dummy(str(regmap_path))
-        else:
-            raise ValueError(f"Unknown I2C type: {i2c_type}")
-    fcfd = FCFD_I2C_register(json_file=str(regmap_path), i2cs=i2cs)
-
+    register_map_by_address, address_by_name = load_configured_devices(config, config_path, argparser)
+    if not register_map_by_address:
+        argparser.error("no usable register maps found in config file")
 
     if args.interactive:
-        while True:
-            print("\nEnter a mode:\n'w' -- write,\n'r' --- read,\n'd' --- set to default,\n't' --- self-test,\n'e' --- exit.")
-            mode = input(str())
-            if mode == 'e':
-                return
-            elif mode == 'w':
-                while True:
-                    print("Enter register name and value(s) to write, separated by a space (e.g. 'register_name 0,1,2') or 'e' to return to mode selection:")
-                    user_input = input(str())
-                    if user_input == 'e':
-                        break
-                    try:
-                        register, values_str = user_input.split()
-                        values = [int(v, 0) for v in values_str.split(",")]
-                        if args.board_address is not None:
-                            board_addresses = [args.board_address]
-                        else:
-                            board_addresses = list(i2cs.keys())
-                        for board_address in board_addresses:
-                            if fcfd.write(board_address, register, bytearray(values)):
-                                logging.info(f"Successfully wrote {values} to {register} on board {board_address}")
-                            else:
-                                logging.error(f"Failed to write {values} to {register} on board {board_address}")
-                    except ValueError as e:
-                        print(f"Invalid input: {e}. Please try again.")
-            elif mode == 'r':
-                while True:
-                    print("Enter register name(s) to read, separated by spaces (e.g. 'register1 register2') or 'all' to read all readable registers, or 'e' to return to mode selection:")
-                    user_input = input(str())
-                    if user_input == 'e':
-                        break
-                    registers = user_input.split()
-                    if args.board_address is not None:
-                        board_addresses = [args.board_address]
-                    else:
-                        board_addresses = list(i2cs.keys())
-                    for board_address in board_addresses:
-                        if "all" in registers:
-                            registers = list(fcfd._registers.keys())
-                        for register in registers:
-                            error_code, value = fcfd.read(board_address, register)
-                            if error_code == 0:
-                                logging.info(f"Read from {register} on board {board_address}: {list(value)}")
-                            elif error_code == -1:
-                                logging.error(f"Failed to read from {register} on board {board_address}: register is unknown or write-only")
-                            else:
-                                logging.error(f"Failed to read from {register} on board {board_address}: {fcfd.describe_error(board_address, error_code)}")
-            elif mode == 'd':
-                if args.board_address is not None:
-                    board_addresses = [args.board_address]
-                else:
-                    board_addresses = list(i2cs.keys())
-                for board_address in board_addresses:
-                    fcfd.set_default(board_address)
-            elif mode == 't':
-                if args.board_address is not None:
-                    board_addresses = [args.board_address]
-                else:
-                    board_addresses = list(i2cs.keys())
-                for board_address in board_addresses:
-                    fcfd.self_test(board_address) 
-            else:
-                print('Invalid mode. Please try again.')
+        run_interactive_mode(register_map_by_address, address_by_name)
+        return
+
+    targets = resolve_command_line_targets(
+        register_map_by_address,
+        address_by_name,
+        args.device_names,
+        args.board_address,
+        argparser,
+    )
 
     if args.self_test:
-        if args.board_address is not None:
-            board_addresses = [args.board_address]
-        else:
-            board_addresses = list(i2cs.keys())
-        for board_address in board_addresses:
-            fcfd.self_test(board_address)
+        for device_name, device_address, device_fcfd in targets:
+            device_fcfd.self_test(device_address)
 
     if args.set_default:
-        if args.board_address is not None:
-            board_addresses = [args.board_address]
-        else:
-            board_addresses = list(i2cs.keys())
-        for board_address in board_addresses:
-            fcfd.set_default(board_address)
+        for device_name, device_address, device_fcfd in targets:
+            device_fcfd.set_default(device_address)
 
     if args.write:
         register, values_str = args.write
         values = [int(v, 0) for v in values_str.split(",")]
-        if args.board_address is not None:
-            board_addresses = [args.board_address]
-        else:
-            board_addresses = list(i2cs.keys())
-        for board_address in board_addresses:
-            if fcfd.write(board_address, register, bytearray(values)):
-                logging.info(f"Successfully wrote {values} to {register} on board {board_address}")
+        for device_name, device_address, device_fcfd in targets:
+            if device_fcfd.write(device_address, register, bytearray(values)):
+                logging.info(f"Successfully wrote {values} to {register} on board {device_address}")
             else:
-                logging.error(f"Failed to write {values} to {register} on board {board_address}")
+                logging.error(f"Failed to write {values} to {register} on board {device_address}")
 
     if args.read:
         registers = args.read
-        if args.board_address is not None:
-            board_addresses = [args.board_address]
-        else:
-            board_addresses = list(i2cs.keys())
-        for board_address in board_addresses:
+        for device_name, device_address, device_fcfd in targets:
             if "all" in registers:
-                registers = list(fcfd._registers.keys())
-        for register in registers:
-            error_code, value = fcfd.read(board_address, register)
-            if error_code == 0:
-                logging.info(f"Read from {register} on board {board_address}: {list(value)}")
-            elif error_code == -1:
-                logging.error(f"Failed to read from {register} on board {board_address}: register is unknown or write-only")
+                target_registers = [
+                    name for name, properties in device_fcfd._registers.items()
+                    if properties["access"] != device_fcfd.access_type.WRITE_ONLY
+                ]
             else:
-                logging.error(f"Failed to read from {register} on board {board_address}: {fcfd.describe_error(board_address, error_code)}")
+                target_registers = registers
+            for register in target_registers:
+                error_code, value = device_fcfd.read(device_address, register)
+                if error_code == 0:
+                    logging.info(f"Read from {register} on board {device_address}: {list(value)}")
+                elif error_code == -1:
+                    logging.error(f"Failed to read from {register} on board {device_address}: register is unknown or write-only")
+                else:
+                    logging.error(f"Failed to read from {register} on board {device_address}: {device_fcfd.describe_error(device_address, error_code)}")
 
 if __name__ == "__main__":
     main()

@@ -22,9 +22,8 @@ class I2C_windows(I2C):
 		0xFF: "Hardware not detected or USB error",
 	}
 
-	def __init__(self, dll_name: str = "USBtoI2Cpro.dll", board_address: int = 0x00):
+	def __init__(self, dll_name: str = "USBtoI2Cpro.dll"):
 		self.dll = ctypes.WinDLL(dll_name)
-		self.board_address = board_address
 		self._configure_dll()
 
 	def _configure_dll(self) -> None:

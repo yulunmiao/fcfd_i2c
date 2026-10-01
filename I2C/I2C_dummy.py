@@ -25,6 +25,7 @@ class I2C_dummy(I2C):
 			if isinstance(properties, dict)
 		)
 		self.registers: bytearray = bytearray([0] * (max_address + 1))
+		self._registers_by_board: dict[int, bytearray] = {}
 		for properties in regmap.values():
 			if not isinstance(properties, dict):
 				continue
@@ -37,12 +38,18 @@ class I2C_dummy(I2C):
 			if default == "N/A":
 				continue
 
+			if isinstance(default, list):
+				default_values = default
+			else:
+				default_values = [default] * byte_width
+
 			for i, range in enumerate(per_byte_ranges):
 				msb = range[-1]
 				lsb = range[0]
 				mask = ((1 << (msb - lsb + 1)) - 1) << lsb
 				current = self.registers[i+lsa]
-				new_value = (current & ~mask) | ((default << lsb) & mask)
+				default_value = default_values[i] if i < len(default_values) else default_values[-1]
+				new_value = (current & ~mask) | ((default_value << lsb) & mask)
 				self.registers[i+lsa] = new_value
 
 	def _per_byte_ranges(self, bit_range, byte_width):
@@ -73,7 +80,10 @@ class I2C_dummy(I2C):
 		"""Read ``n`` contiguous values from the register list."""
 		if not self._valid_range(address, n):
 			return 0x01, bytes()
-		return 0x00, bytes(self.registers[address:address + n])
+		registers = self._registers_by_board.setdefault(
+			board_address, bytearray(self.registers)
+		)
+		return 0x00, bytes(registers[address:address + n])
 
 
 	def write(self, board_address: int, address: int, data) -> bool:
@@ -81,7 +91,10 @@ class I2C_dummy(I2C):
 		values = bytes([data]) if isinstance(data, int) else bytes(data)
 		if not self._valid_range(address, len(values)):
 			return False
-		self.registers[address:address + len(values)] = values
+		registers = self._registers_by_board.setdefault(
+			board_address, bytearray(self.registers)
+		)
+		registers[address:address + len(values)] = values
 		return True
 
 	def get_number_of_devices(self) -> int:
