@@ -32,7 +32,7 @@ fcfd-i2c/
 ### Software
 - Python 3.9+
 
-### Hardware usage on Windows (Using `I2C_windoes.py`)
+### Hardware usage on Windows (Using `I2C_windows.py`)
 
 - Windows machine
 - USB-to-I2C Professional DLL installed and available as `USBtoI2Cpro.dll`
@@ -45,9 +45,16 @@ The configuration files tell the software which register map to load and which I
 
 ```json
 {
-    "regmap": "../regmaps/$REG_MAP_TO_USE",
-    "board_addresses": [Address1, Address2, ...],
-    "I2C_type": [Type1, Type2, ...]
+    "FCFD": {
+        "regmap": "../regmaps/FCFD_v1.2.json",
+        "address": 114,
+        "I2C_type": "dummy"
+    },
+    "VDDA": {
+        "regmap": "../regmaps/INA219.json",
+        "address": 64,
+        "I2C_type": "dummy"
+    }
 }
 ```
 
@@ -55,7 +62,7 @@ The configuration files tell the software which register map to load and which I
 The relevant fields are:
 
 - `regmap`: path to the register definition JSON
-- `board_addresses`: list of device addresses to query
+- `address`: board/device address for the configured device
 - `I2C_type`: I2C transport backend, currently either `windows` or `dummy`
 
 ## Register map format
@@ -229,13 +236,15 @@ Examples can be found as `I2C/I2C_dummy.py`
 
 ### Registering the backend in configuration
 
-Once the new backend class exists, add it to the configuration file:
+Once the new backend class exists, add it to the configuration file as a named device entry:
 
 ```json
 {
-    "regmap": "../regmaps/FCFD_v1.2.json",
-    "board_addresses": [114],
-    "I2C_type": ["custom"]
+    "FCFD": {
+        "regmap": "../regmaps/FCFD_v1.2.json",
+        "address": 114,
+        "I2C_type": "custom"
+    }
 }
 ```
 
