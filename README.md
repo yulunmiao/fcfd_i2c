@@ -4,7 +4,7 @@ Python tools for reading and writing the FCFD device register over I2C.
 
 ## Overview
 
-This repository provides a register-driven interface for the FCFD I2C communication. The main logic lives in `FCFD_I2C_register.py`. JSON format register maps are stored in `regmaps/`. JSON format connection configurations are stored in `config/`. The actually I2C is handled by codes in `I2C/`.
+This repository provides a register-driven interface for I2C devices. The generic register-map class lives in `i2c_register_map.py`, and the FCFD command-line interface lives in `FCFD_I2C_register.py`. JSON format register maps are stored in `regmaps/`. JSON format connection configurations are stored in `config/`. The I2C transports are handled by code in `I2C/`.
 
 Currently, a windows USB-to-I2C Professional DLL based I2C is achieved in `I2C/I2C_windows.py`. A mock transport using memory as I2C registers is achieved in `I2C/I2C_dummy.py` for testing and developing purpose.
 
@@ -13,6 +13,7 @@ Currently, a windows USB-to-I2C Professional DLL based I2C is achieved in `I2C/I
 ```text
 fcfd-i2c/
 ├── FCFD_I2C_register.py
+├── i2c_register_map.py
 ├── README.md
 ├── config/
 │   ├── config_dummy.json
@@ -100,6 +101,14 @@ python FCFD_I2C_register.py --json ./config/config_dummy.json --read all
 
 This reads all readable registers using the dummy backend.
 
+Devices with the same register map and I2C type share a register-map and transport instance. Select configured devices by name, address, or both:
+
+```bash
+python FCFD_I2C_register.py --json ./config/config_dummy.json --device-name VDDA --read rst
+python FCFD_I2C_register.py --json ./config/config_dummy.json --board-address 64 --read rst
+python FCFD_I2C_register.py --json ./config/config_dummy.json --device-name VDDA VDD --board-address 64 --read rst
+```
+
 ### Read registers
 
 ```bash
@@ -160,7 +169,8 @@ Supported options include:
 - `--set-default`, `-d` – apply default register values
 - `--self-test`, `-t` – verify read/write behavior
 - `--interactive`, `-i` – interactive terminal prompt
-- `--board-address`, `-b` – override address selection
+- `--device-name`, `--device` – select configured device names
+- `--board-address`, `-b` – select board addresses; can be combined with device names
 - `--debug`, `-D` – enable debug logging
 - `--log-file`, `-l` – write logs to a file
 
@@ -169,15 +179,15 @@ Supported options include:
 Example of manual use from Python:
 
 ```python
-from FCFD_I2C_register import FCFD_I2C_register
+from i2c_register_map import I2CRegisterMap
 from I2C.I2C_dummy import I2C_dummy
 
-fcfd = FCFD_I2C_register(
+register_map = I2CRegisterMap(
     json_file="regmaps/FCFD_v1.2.json",
-    i2cs={0x00: I2C_dummy("regmaps/FCFD_v1.2.json")},
+    i2c=I2C_dummy("regmaps/FCFD_v1.2.json"),
 )
 
-error_code, value = fcfd.read(0x00, "some_register")
+error_code, value = register_map.read(0x00, "some_register")
 print(error_code, list(value) if value is not None else None)
 ```
 
@@ -233,10 +243,10 @@ Then update the dispatch logic in `FCFD_I2C_register.py` to instantiate the new 
 
 ```python
 if i2c_type == "custom":
-    i2cs[board_address] = I2C_Custom(board_address=board_address)
+    i2cs[board_address] = I2C_Custom()
 ```
 
-This keeps the rest of the project unchanged and lets the register layer work with any compatible backend.
+The board address is passed to each backend's `read` and `write` methods, not to its constructor. This keeps the register layer independent of individual board addresses and lets it work with any compatible backend.
 
 
 ## Useful documents 
